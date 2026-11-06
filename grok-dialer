@@ -1,0 +1,111 @@
+#!/usr/bin/env python3
+# Grok quick dialer (5 Nov 2026): Super+Shift+Q drops a list of your people from the top-centre; click one (or press
+# its number, or arrows + Enter) to call. Esc or click-away closes. Names come from the Grok Bot sidebar via CDP 9335.
+import json, os, subprocess
+import gi
+gi.require_version('Gtk', '3.0'); gi.require_version('Gdk', '3.0'); gi.require_version('GtkLayerShell', '0.1')
+from gi.repository import Gtk, Gdk, GLib, GtkLayerShell
+
+NODE = 'node'
+TOGGLE = os.path.expanduser('~/.local/bin/grok-voice-toggle')
+try:
+    people = json.loads(subprocess.run([NODE, TOGGLE, '--list'], capture_output=True, timeout=8).stdout or b'[]')
+except Exception:
+    people = []
+if not people:
+    subprocess.Popen(['notify-send', '-t', '2500', 'Quick dialer', 'No people found. Open Grok Bot first (Super+Q).'])
+    raise SystemExit
+
+W = 340
+css = Gtk.CssProvider()
+css.load_from_data(b"""
+window { background: transparent; }
+#card { background: #16161a; border: 1px solid rgba(255,255,255,0.14); border-radius: 14px; padding: 8px; }
+#title { color: #9a9aa2; font-family: 'JetBrainsMono Nerd Font'; font-size: 11px; padding: 4px 10px 6px 10px; }
+button.row { background: transparent; border: none; border-radius: 10px; padding: 8px 4px; box-shadow: none; background-image: none; }
+button.row:hover, button.row:focus { background: rgba(95,181,156,0.18); }
+button.row label { color: #f2f2f2; font-family: 'JetBrainsMono Nerd Font'; font-size: 13px; }
+.num { color: #5fb59c; font-family: 'JetBrainsMono Nerd Font'; font-size: 12px; }
+.role { color: #9a9aa2; font-family: 'JetBrainsMono Nerd Font'; font-size: 11px; }
+""")
+Gtk.StyleContext.add_provider_for_screen(Gdk.Screen.get_default(), css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+
+win = Gtk.Window()
+GtkLayerShell.init_for_window(win)
+GtkLayerShell.set_layer(win, GtkLayerShell.Layer.OVERLAY)
+GtkLayerShell.set_anchor(win, GtkLayerShell.Edge.TOP, True)
+GtkLayerShell.set_keyboard_mode(win, GtkLayerShell.KeyboardMode.EXCLUSIVE)
+GtkLayerShell.set_namespace(win, 'grok-dialer')
+win.set_default_size(W, 10)
+win.set_app_paintable(True)
+vis = win.get_screen().get_rgba_visual()
+if vis: win.set_visual(vis)
+
+def call(p):
+    subprocess.Popen([NODE, TOGGLE, '--call', p['id']], start_new_session=True,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    win.close()
+
+import math, urllib.parse, cairo
+from gi.repository import GdkPixbuf
+SIZE = 64
+BOTTOM_COLOURS = [(1.0, 0.23, 0.31), (0.18, 0.48, 1.0), (0.37, 0.71, 0.61), (0.85, 0.57, 0.11)]  # agents without a photo  # no photo: coloured dot like the Grok sidebar
+
+def avatar(p, first):
+    surf = cairo.ImageSurface(cairo.FORMAT_ARGB32, SIZE, SIZE); cr = cairo.Context(surf)
+    cr.arc(SIZE / 2, SIZE / 2, SIZE / 2, 0, 2 * math.pi); cr.clip()
+    path = urllib.parse.unquote(p.get('img', '').replace('file://', ''))
+    try:
+        pb = GdkPixbuf.Pixbuf.new_from_file_at_scale(path, SIZE, SIZE, False)
+        side = min(pb.get_width(), pb.get_height())
+        pb = GdkPixbuf.Pixbuf.new_from_file_at_scale(path, SIZE, SIZE, False)
+        Gdk.cairo_set_source_pixbuf(cr, pb, (SIZE - pb.get_width()) / 2, (SIZE - pb.get_height()) / 2); cr.paint()
+    except Exception:
+        cr.set_source_rgb(*BOTTOM.get(first, (0.37, 0.71, 0.61))); cr.paint()
+        cr.set_source_rgb(1, 1, 1); cr.select_font_face('sans-serif', 0, 1); cr.set_font_size(28)
+        ext = cr.text_extents(first[:1]); cr.move_to(SIZE / 2 - ext.width / 2 - ext.x_bearing, SIZE / 2 + ext.height / 2); cr.show_text(first[:1])
+    return Gtk.Image.new_from_surface(surf)
+
+for p in people:
+    p['first'] = p['name'].split(' · ')[0].strip()
+team = [p for p in people if p.get('img')]  # agents with a photo on top, the rest in a bottom row
+bottom = [p for p in people if not p.get('img')]
+BOTTOM = {p['first']: BOTTOM_COLOURS[i % len(BOTTOM_COLOURS)] for i, p in enumerate(bottom)}
+
+box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4); box.set_name('card')
+t = Gtk.Label(label='Call who?  (tap, 1-9, or arrows + Enter · Esc closes)', xalign=0); t.set_name('title'); box.pack_start(t, False, False, 0)
+rows = []; order = team + bottom
+def tile(p):
+    b = Gtk.Button(); b.get_style_context().add_class('row'); b.set_relief(Gtk.ReliefStyle.NONE)
+    v = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+    v.pack_start(avatar(p, p['first']), False, False, 0)
+    l = Gtk.Label(label=p['first']); v.pack_start(l, False, False, 0)
+    b.add(v); b.set_size_request(84, -1); b.connect('clicked', lambda _w, p=p: call(p)); rows.append(b)
+    return b
+COLS = 4
+grid = Gtk.Grid(column_homogeneous=True, row_spacing=2, column_spacing=2)
+for i, p in enumerate(team): grid.attach(tile(p), i % COLS, i // COLS, 1, 1)
+box.pack_start(grid, False, False, 0)
+sep = Gtk.Separator(); box.pack_start(sep, False, False, 4)
+bg = Gtk.Grid(column_homogeneous=True, row_spacing=2, column_spacing=2)
+for i, p in enumerate(bottom): bg.attach(tile(p), i, 0, 1, 1)
+box.pack_start(bg, False, False, 0)
+win.add(box)
+
+def on_key(_w, ev):
+    k = Gdk.keyval_name(ev.keyval)
+    if k == 'Escape': win.close(); return True
+    if k and k.isdigit() and 1 <= int(k) <= min(9, len(order)): call(order[int(k) - 1]); return True
+    return False
+win.connect('key-press-event', on_key)
+win.connect('focus-out-event', lambda *_: GLib.timeout_add(150, lambda: (win.close(), False)[1]))
+win.connect('destroy', Gtk.main_quit)
+win.show_all(); rows[0].grab_focus()
+GtkLayerShell.set_margin(win, GtkLayerShell.Edge.TOP, -400)
+cur = [-400]
+def step():
+    cur[0] = min(8, cur[0] + max(1, (8 - cur[0]) // 4))
+    GtkLayerShell.set_margin(win, GtkLayerShell.Edge.TOP, cur[0])
+    return cur[0] < 8
+GLib.timeout_add(16, step)
+Gtk.main()

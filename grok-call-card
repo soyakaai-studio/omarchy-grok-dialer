@@ -1,0 +1,74 @@
+#!/usr/bin/env python3
+# Grok voice call card (5 Nov 2026): drops from the top-centre like an incoming phone call, names who you are talking to,
+# shows a timer, and slides away when the call ends. Usage: grok-call-card "<name · role>"
+import os, subprocess, sys, time
+import gi
+gi.require_version('Gtk', '3.0'); gi.require_version('Gdk', '3.0'); gi.require_version('GtkLayerShell', '0.1')
+from gi.repository import Gtk, Gdk, GLib, GtkLayerShell
+
+who = sys.argv[1] if len(sys.argv) > 1 else 'Grok Bot'
+name, _, role = who.partition(' · ')
+TOGGLE = ['node', os.path.expanduser('~/.local/bin/grok-voice-toggle'), '--in-call']
+W, H, TOP = 340, 76, 8
+t0 = time.time()
+
+css = Gtk.CssProvider()
+css.load_from_data(b"""
+window { background: transparent; }
+#card { background: #16161a; border: 1px solid rgba(255,255,255,0.14); border-radius: 14px; padding: 10px 18px; }
+#dot { color: #5fb59c; font-size: 12px; }
+#name { color: #f2f2f2; font-family: 'JetBrainsMono Nerd Font'; font-size: 16px; font-weight: bold; }
+#sub { color: #9a9aa2; font-family: 'JetBrainsMono Nerd Font'; font-size: 11px; }
+#time { color: #5fb59c; font-family: 'JetBrainsMono Nerd Font'; font-size: 14px; }
+""")
+Gtk.StyleContext.add_provider_for_screen(Gdk.Screen.get_default(), css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+
+win = Gtk.Window()
+GtkLayerShell.init_for_window(win)
+GtkLayerShell.set_layer(win, GtkLayerShell.Layer.OVERLAY)
+GtkLayerShell.set_anchor(win, GtkLayerShell.Edge.TOP, True)
+GtkLayerShell.set_keyboard_mode(win, GtkLayerShell.KeyboardMode.NONE)
+GtkLayerShell.set_namespace(win, 'grok-call-card')
+GtkLayerShell.set_margin(win, GtkLayerShell.Edge.TOP, -H - 4)
+win.set_default_size(W, H)
+win.set_app_paintable(True)
+vis = win.get_screen().get_rgba_visual()
+if vis: win.set_visual(vis)
+
+box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12); box.set_name('card')
+dot = Gtk.Label(label='📞'); dot.set_name('dot'); box.pack_start(dot, False, False, 0)
+col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+n = Gtk.Label(label=name or 'Grok Bot', xalign=0); n.set_name('name')
+s = Gtk.Label(label=(role + ' · ' if role else '') + 'on a call', xalign=0); s.set_name('sub')
+col.pack_start(n, False, False, 0); col.pack_start(s, False, False, 0)
+box.pack_start(col, True, True, 0)
+tm = Gtk.Label(label='0:00'); tm.set_name('time'); box.pack_end(tm, False, False, 0)
+win.add(box); win.show_all()
+
+def slide(to, done=None):
+    cur = [GtkLayerShell.get_margin(win, GtkLayerShell.Edge.TOP)]
+    def step():
+        d = to - cur[0]
+        cur[0] += max(1, abs(d) // 4) * (1 if d > 0 else -1) if d else 0
+        GtkLayerShell.set_margin(win, GtkLayerShell.Edge.TOP, cur[0])
+        if cur[0] == to:
+            if done: done()
+            return False
+        return True
+    GLib.timeout_add(16, step)
+
+def tick():
+    e = int(time.time() - t0); tm.set_text(f'{e // 60}:{e % 60:02d}'); return True
+GLib.timeout_add(1000, tick)
+
+misses = [0]
+def poll():
+    if time.time() - t0 < 8: return True  # grace while the call connects
+    r = subprocess.run(TOGGLE, capture_output=True).returncode
+    misses[0] = 0 if r == 0 else misses[0] + 1
+    if misses[0] >= 2:
+        slide(-H - 4, Gtk.main_quit); return False
+    return True
+GLib.timeout_add(2000, poll)
+slide(TOP)
+Gtk.main()

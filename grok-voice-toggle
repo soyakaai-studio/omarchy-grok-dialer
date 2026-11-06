@@ -1,0 +1,63 @@
+#!/usr/bin/env node
+// Toggle Grok Bot voice chat (2 Nov 2026): ends any live call, else starts one in the
+// focused Grok window's chat (main window if none focused). Talks to DevTools port 9335.
+const PORT = 9335;
+const notify = (msg) => require("child_process").spawn("notify-send", ["-t", "2000", "Grok voice", msg]);
+
+function evaluate(wsUrl, expression) {
+  return new Promise((resolve) => {
+    const ws = new WebSocket(wsUrl);
+    const timer = setTimeout(() => { ws.close(); resolve(null); }, 3000);
+    ws.onopen = () => ws.send(JSON.stringify({ id: 1, method: "Runtime.evaluate", params: { expression, returnByValue: true } }));
+    ws.onmessage = (e) => {
+      const m = JSON.parse(e.data);
+      if (m.id === 1) { clearTimeout(timer); ws.close(); resolve(m.result?.result?.value ?? null); }
+    };
+    ws.onerror = () => { clearTimeout(timer); resolve(null); };
+  });
+}
+
+const STATE = `({focused: document.hasFocus(),
+  who: (document.querySelector('h1,h2,[role=heading]')||{}).innerText||'',
+  inCall: !!document.querySelector('[aria-label="Hang up"]'),
+  canStart: !!document.querySelector('[aria-label="Start voice chat"]')})`;
+const click = (label) => `(() => { const b = document.querySelector('[aria-label="${label}"]'); if (!b) return false; b.click(); return true; })()`;
+
+(async () => {
+  const inCallMode = process.argv.includes("--in-call");
+  let targets;
+  try { targets = await (await fetch(`http://127.0.0.1:${PORT}/json/list`)).json(); }
+  catch { if (inCallMode) process.exit(1); return notify("Grok Bot isn't running (Super+Q opens it)"); }
+  const pages = [];
+  for (const t of targets.filter((t) => t.type === "page")) {
+    const s = await evaluate(t.webSocketDebuggerUrl, STATE);
+    if (s) pages.push({ ...t, ...s });
+  }
+  const live = pages.find((p) => p.inCall);
+  if (inCallMode) process.exit(live ? 0 : 1);
+  if (live) { require("child_process").spawnSync("pkill", ["-f", "bin/grok-call-card"]); return (await evaluate(live.webSocketDebuggerUrl, click("Hang up"))) ? notify("Call ended") : notify("Couldn't end the call"); }
+  const main = pages.find((p) => p.title === "Grok Bot") || pages[0];
+  if (!main) return notify("Open Grok Bot first (Super+Q)");
+  const cp = require("child_process");
+  const flag = (f) => process.argv.indexOf(f);
+  if (flag("--list") >= 0) {
+    const r = await evaluate(main.webSocketDebuggerUrl, `JSON.stringify([...document.querySelectorAll("button[data-agent-id]")].filter(e=>e.getBoundingClientRect().height>0).map(e=>({id:e.dataset.agentId,name:(e.getAttribute("aria-label")||"").replace(/, (Unread activity|Main Bot)/g,"").trim(),img:(e.querySelector("img")||{}).src||""})))`);
+    console.log(r || "[]"); process.exit(0);
+  }
+  if (flag("--call") >= 0) {
+    const id = process.argv[flag("--call") + 1];
+    const name = await evaluate(main.webSocketDebuggerUrl, `(() => { const b = document.querySelector('button[data-agent-id="${id}"]'); if (!b) return null; b.click(); return (b.getAttribute("aria-label")||"").replace(/, (Unread activity|Main Bot)/g,"").trim(); })()`);
+    if (!name) return notify("Couldn't find that agent in the Grok Bot sidebar");
+    for (let i = 0; i < 20; i++) {
+      await new Promise((r) => setTimeout(r, 300));
+      if (await evaluate(main.webSocketDebuggerUrl, click("Start voice chat"))) {
+        cp.spawn(require("path").join(__dirname, "grok-call-card"), [name], { detached: true, stdio: "ignore" }).unref();
+        return;
+      }
+    }
+    return notify("Couldn't start the call with " + name);
+  }
+  // Quick dialer (5 Nov 2026): the hotkey no longer dials the open chat; it drops a list of people, tap one to call.
+  if (cp.spawnSync("pkill", ["-f", "bin/grok-dialer"]).status === 0) return;
+  cp.spawn(require("path").join(__dirname, "grok-dialer"), [], { detached: true, stdio: "ignore" }).unref();
+})();
